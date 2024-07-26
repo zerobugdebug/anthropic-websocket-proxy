@@ -27,6 +27,7 @@ const (
 	envAnthropicKey         = "ANTHROPIC_KEY"
 	envAnthropicModel       = "ANTHROPIC_MODEL"
 	envAnthropicVersion     = "ANTHROPIC_VERSION"
+	envSystemPrompt         = "SYSTEM_PROMPT"
 )
 
 type Message struct {
@@ -70,6 +71,7 @@ type Config struct {
 	AnthropicKey     string
 	AnthropicModel   string
 	AnthropicVersion string
+	SystemPrompt     string
 }
 
 // createResponse creates an API Gateway response with a specified message and status code
@@ -83,10 +85,11 @@ func createResponse(message string, statusCode int) (events.APIGatewayProxyRespo
 // loadConfig loads configuration from environment variables
 func loadConfig() (Config, error) {
 	cfg := Config{
-		AnthropicURL:     os.Getenv("ANTHROPIC_URL"),
-		AnthropicKey:     os.Getenv("ANTHROPIC_KEY"),
-		AnthropicModel:   os.Getenv("ANTHROPIC_MODEL"),
-		AnthropicVersion: os.Getenv("ANTHROPIC_VERSION"),
+		AnthropicURL:     os.Getenv(envAnthropicURL),
+		AnthropicKey:     os.Getenv(envAnthropicKey),
+		AnthropicModel:   os.Getenv(envAnthropicModel),
+		AnthropicVersion: os.Getenv(envAnthropicVersion),
+		SystemPrompt:     os.Getenv(envSystemPrompt),
 	}
 
 	if cfg.AnthropicKey == "" {
@@ -185,12 +188,13 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 }
 
 // NewAnthropicRequest creates a new AnthropicRequest with default values
-func NewAnthropicRequest(model string, messages []AnthropicMessage) *AnthropicRequest {
+func NewAnthropicRequest(model string, system string, messages []AnthropicMessage) *AnthropicRequest {
 	return &AnthropicRequest{
 		Model:     model,
 		MaxTokens: 1024,
 		Messages:  messages,
 		Stream:    true,
+		System:    system,
 	}
 }
 
@@ -200,12 +204,12 @@ func MarshalRequest(req *AnthropicRequest) ([]byte, error) {
 }
 
 // Function to convert received Request to AnthropicRequest
-func ConvertToAnthropicRequest(req Request, model string) *AnthropicRequest {
+func ConvertToAnthropicRequest(req Request, model string, system string) *AnthropicRequest {
 	messages := make([]AnthropicMessage, len(req.Messages))
 	for i, msg := range req.Messages {
 		messages[i] = AnthropicMessage(msg)
 	}
-	return NewAnthropicRequest(model, messages)
+	return NewAnthropicRequest(model, system, messages)
 }
 
 func callAnthropicAPI(req Request, textChan chan<- string) error {
@@ -214,16 +218,15 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	if err != nil {
 		return fmt.Errorf("error loading config: %s", err)
 	}
+	fmt.Printf("config: %v\n", config)
 
-	// Implement the logic to call Anthropic API and process the stream
 	anthropicURL := config.AnthropicURL
 	anthropicAPIKey := config.AnthropicKey
 	anthropicModel := config.AnthropicModel
-	AnthropicVersion := config.AnthropicVersion
+	anthropicVersion := config.AnthropicVersion
+	systemPrompt := config.SystemPrompt
 
-	fmt.Printf("config: %v\n", config)
-
-	anthropicReq := ConvertToAnthropicRequest(req, anthropicModel)
+	anthropicReq := ConvertToAnthropicRequest(req, anthropicModel, systemPrompt)
 
 	requestBody, err := MarshalRequest(anthropicReq)
 	if err != nil {
@@ -238,7 +241,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", anthropicAPIKey)
-	httpReq.Header.Set("anthropic-version", AnthropicVersion)
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
