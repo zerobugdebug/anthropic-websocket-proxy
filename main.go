@@ -143,7 +143,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Error parsing request JSON: %w", err), http.StatusBadRequest)
+		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest)
 	}
 
 	// Create a channel to receive text blocks
@@ -161,7 +161,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 
 	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %w", err), http.StatusInternalServerError)
+		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError)
 	}
 
 	for {
@@ -172,11 +172,11 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			}
 			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
 			if err != nil {
-				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %w", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError)
 			}
 		case err := <-errorChan:
 			if err != nil {
-				return createResponse(fmt.Sprintf("Error calling Anthropic API: %w", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
 			}
 		case <-ctx.Done():
 			return createResponse("Request timeout", http.StatusGatewayTimeout)
