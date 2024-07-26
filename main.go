@@ -22,7 +22,6 @@ const (
 	defaultAnthropicVersion = "2023-06-01"
 	connectRouteKey         = "$connect"
 	disconnectRouteKey      = "$disconnect"
-	messageRouteKey         = "message"
 	envAnthropicURL         = "ANTHROPIC_URL"
 	envAnthropicKey         = "ANTHROPIC_KEY"
 	envAnthropicModel       = "ANTHROPIC_MODEL"
@@ -74,10 +73,14 @@ type Config struct {
 
 // createResponse creates an API Gateway response with a specified message and status code
 func createResponse(message string, statusCode int) (events.APIGatewayProxyResponse, error) {
+	var retErr error
+	if statusCode != http.StatusOK {
+		retErr = fmt.Errorf(message, statusCode)
+	}
 	return events.APIGatewayProxyResponse{
 		Body:       message,
 		StatusCode: statusCode,
-	}, nil
+	}, retErr
 }
 
 // loadConfig loads configuration from environment variables
@@ -114,10 +117,8 @@ func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyReq
 		return handleConnect(event)
 	case disconnectRouteKey:
 		return handleDisconnect(event)
-	case messageRouteKey:
-		return handleSendMessage(ctx, event)
 	default:
-		return createResponse(fmt.Sprintf("Unknown route key: %s", event.RequestContext.RouteKey), http.StatusBadRequest)
+		return handleSendMessage(ctx, event)
 	}
 }
 
@@ -163,10 +164,12 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	if err != nil {
 		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError)
 	}
+	fmt.Printf("wsClient: %v\n", wsClient)
 
 	for {
 		select {
 		case text, ok := <-textChan:
+			fmt.Printf("text: %v\n", text)
 			if !ok {
 				return createResponse("Message processing completed", http.StatusOK)
 			}
@@ -175,6 +178,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError)
 			}
 		case err := <-errorChan:
+			fmt.Printf("err: %v\n", err)
 			if err != nil {
 				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
 			}
@@ -280,7 +284,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 				if delta, ok := eventData["delta"].(map[string]interface{}); ok {
 					if textDelta, ok := delta["text"].(string); ok {
 						textChan <- textDelta
-						fmt.Print(textDelta)
+						fmt.Println("[" + textDelta + "]")
 					}
 				}
 			case "content_block_stop":
@@ -311,6 +315,7 @@ func createWebSocketClient(ctx context.Context, domainName, stage string) (*apig
 
 	client := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
 		//		o.EndpointResolverV2 = apigatewaymanagementapi.EndpointResolverV2FromURL(fmt.Sprintf("https://%s/%s", domainName, stage))
+		fmt.Printf("URL: https://%s/%s", domainName, stage)
 		o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s/%s", domainName, stage))
 	})
 
@@ -322,6 +327,9 @@ func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.C
 		ConnectionId: aws.String(connectionID),
 		Data:         []byte(message),
 	})
+	if err != nil {
+		fmt.Printf("sendWebSocketMessage: Failed to send WebSocket message: %v", err)
+	}
 	return err
 }
 
