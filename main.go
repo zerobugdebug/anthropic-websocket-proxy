@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,22 @@ type AnthropicResponse struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
+}
+
+// AnthropicMessage represents a single message in the conversation
+type AnthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// AnthropicRequest represents the full request structure for the Anthropic API
+type AnthropicRequest struct {
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Messages    []AnthropicMessage `json:"messages"`
+	Stream      bool               `json:"stream,omitempty"`
+	Temperature float64            `json:"temperature,omitempty"`
+	System      string             `json:"system,omitempty"`
 }
 
 type Config struct {
@@ -167,6 +184,30 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	}
 }
 
+// NewAnthropicRequest creates a new AnthropicRequest with default values
+func NewAnthropicRequest(model string, messages []AnthropicMessage) *AnthropicRequest {
+	return &AnthropicRequest{
+		Model:     model,
+		MaxTokens: 1024,
+		Messages:  messages,
+		Stream:    true,
+	}
+}
+
+// MarshalRequest marshals the AnthropicRequest into JSON
+func MarshalRequest(req *AnthropicRequest) ([]byte, error) {
+	return json.Marshal(req)
+}
+
+// Function to convert received Request to AnthropicRequest
+func ConvertToAnthropicRequest(req Request, model string) *AnthropicRequest {
+	messages := make([]AnthropicMessage, len(req.Messages))
+	for i, msg := range req.Messages {
+		messages[i] = AnthropicMessage(msg)
+	}
+	return NewAnthropicRequest(model, messages)
+}
+
 func callAnthropicAPI(req Request, textChan chan<- string) error {
 
 	config, err := loadConfig()
@@ -178,28 +219,26 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	anthropicURL := config.AnthropicURL
 	anthropicAPIKey := config.AnthropicKey
 	anthropicModel := config.AnthropicModel
+	AnthropicVersion := config.AnthropicVersion
 
 	fmt.Printf("config: %v\n", config)
 
-	// Marshal the messages
-	messagesJSON, err := json.Marshal(req.Messages)
-	if err != nil {
-		return fmt.Errorf("failed to marshal messages: %w", err)
-	}
-	fmt.Printf("messagesJSON: %v\n", messagesJSON)
+	anthropicReq := ConvertToAnthropicRequest(req, anthropicModel)
 
-	// Construct the request body
-	requestBody := fmt.Sprintf(`{"model": "%s", "max_tokens": 1024, "messages": %s}`, anthropicModel, string(messagesJSON))
+	requestBody, err := MarshalRequest(anthropicReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
 	fmt.Printf("requestBody: %v\n", requestBody)
 
-	httpReq, err := http.NewRequest("POST", anthropicURL, strings.NewReader(requestBody))
+	httpReq, err := http.NewRequest("POST", anthropicURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", anthropicAPIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("anthropic-version", AnthropicVersion)
 
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
@@ -225,6 +264,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 			if err != nil {
 				return err
 			}
+			fmt.Printf("eventData: %v\n", eventData)
 
 			switch currentEvent {
 			case "message_start":
