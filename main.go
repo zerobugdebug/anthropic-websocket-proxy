@@ -27,7 +27,6 @@ const (
 	envAnthropicKey         = "ANTHROPIC_KEY"
 	envAnthropicModel       = "ANTHROPIC_MODEL"
 	envAnthropicVersion     = "ANTHROPIC_VERSION"
-	envSystemPrompt         = "SYSTEM_PROMPT"
 )
 
 type Message struct {
@@ -71,7 +70,6 @@ type Config struct {
 	AnthropicKey     string
 	AnthropicModel   string
 	AnthropicVersion string
-	SystemPrompt     string
 }
 
 // createResponse creates an API Gateway response with a specified message and status code
@@ -89,7 +87,6 @@ func loadConfig() (Config, error) {
 		AnthropicKey:     os.Getenv(envAnthropicKey),
 		AnthropicModel:   os.Getenv(envAnthropicModel),
 		AnthropicVersion: os.Getenv(envAnthropicVersion),
-		SystemPrompt:     os.Getenv(envSystemPrompt),
 	}
 
 	if cfg.AnthropicKey == "" {
@@ -146,7 +143,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest)
+		return createResponse(fmt.Sprintf("Error parsing request JSON: %w", err), http.StatusBadRequest)
 	}
 
 	// Create a channel to receive text blocks
@@ -164,7 +161,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 
 	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError)
+		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %w", err), http.StatusInternalServerError)
 	}
 
 	for {
@@ -175,11 +172,11 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			}
 			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
 			if err != nil {
-				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %w", err), http.StatusInternalServerError)
 			}
 		case err := <-errorChan:
 			if err != nil {
-				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Error calling Anthropic API: %w", err), http.StatusInternalServerError)
 			}
 		case <-ctx.Done():
 			return createResponse("Request timeout", http.StatusGatewayTimeout)
@@ -216,7 +213,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 
 	config, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("error loading config: %s", err)
+		return fmt.Errorf("error loading config: %w", err)
 	}
 	fmt.Printf("config: %v\n", config)
 
@@ -224,7 +221,10 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	anthropicAPIKey := config.AnthropicKey
 	anthropicModel := config.AnthropicModel
 	anthropicVersion := config.AnthropicVersion
-	systemPrompt := config.SystemPrompt
+	systemPrompt := os.Getenv(req.PromptTemplate)
+	if systemPrompt == "" {
+		fmt.Printf("system prompt [%s] was not found", req.PromptTemplate)
+	}
 
 	anthropicReq := ConvertToAnthropicRequest(req, anthropicModel, systemPrompt)
 
