@@ -179,14 +179,18 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	anthropicAPIKey := config.AnthropicKey
 	anthropicModel := config.AnthropicModel
 
+	fmt.Printf("config: %v\n", config)
+
 	// Marshal the messages
 	messagesJSON, err := json.Marshal(req.Messages)
 	if err != nil {
 		return fmt.Errorf("failed to marshal messages: %w", err)
 	}
+	fmt.Printf("messagesJSON: %v\n", messagesJSON)
 
 	// Construct the request body
 	requestBody := fmt.Sprintf(`{"model": "%s", "max_tokens": 1024, "messages": %s}`, anthropicModel, string(messagesJSON))
+	fmt.Printf("requestBody: %v\n", requestBody)
 
 	httpReq, err := http.NewRequest("POST", anthropicURL, strings.NewReader(requestBody))
 	if err != nil {
@@ -209,10 +213,13 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		fmt.Printf("line: %v\n", line)
 		if strings.HasPrefix(line, "event: ") {
 			currentEvent = strings.TrimPrefix(line, "event: ")
+			fmt.Printf("currentEvent: %v\n", currentEvent)
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
+			fmt.Printf("data: %v\n", data)
 			var eventData map[string]interface{}
 			err := json.Unmarshal([]byte(data), &eventData)
 			if err != nil {
@@ -220,15 +227,28 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 			}
 
 			switch currentEvent {
+			case "message_start":
+				fmt.Println("Message started")
+			case "content_block_start":
+				fmt.Println("Content block started")
+			case "ping":
+				fmt.Println("Received ping")
 			case "content_block_delta":
 				if delta, ok := eventData["delta"].(map[string]interface{}); ok {
 					if textDelta, ok := delta["text"].(string); ok {
 						textChan <- textDelta
+						fmt.Print(textDelta)
 					}
 				}
+			case "content_block_stop":
+				fmt.Println("Content block stopped")
+			case "message_delta":
+				fmt.Println("Received message delta")
 			case "message_stop":
-				// End of message, we can return
+				fmt.Println("Message stopped")
 				return nil
+			default:
+				fmt.Printf("Unhandled event type: %s", currentEvent)
 			}
 		}
 	}
