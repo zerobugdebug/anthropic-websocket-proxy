@@ -6,13 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/apigatewaymanagementapi"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
+)
+
+const (
+	defaultAnthropicModel   = "claude-3-5-sonnet-2024062"
+	defaultAnthropicVersion = "2023-06-01"
+	connectRouteKey         = "$connect"
+	disconnectRouteKey      = "$disconnect"
 )
 
 type Message struct {
@@ -36,28 +44,72 @@ type AnthropicResponse struct {
 }
 
 type Config struct {
-	AnthropicKey       string
-	AnthropicModel     string
-	APIGatewayEndpoint string
+	AnthropicURL     string
+	AnthropicKey     string
+	AnthropicModel   string
+	AnthropicVersion string
 }
 
-var config Config // Global configuration variable
-
-// errorResponse creates an error response with a specified message and status code
-func errorResponse(message string, statusCode int) (events.APIGatewayProxyResponse, error) {
+// createResponse creates an API Gateway response with a specified message and status code
+func createResponse(message string, statusCode int) (events.APIGatewayProxyResponse, error) {
 	return events.APIGatewayProxyResponse{
 		Body:       message,
 		StatusCode: statusCode,
 	}, nil
 }
 
-// getAPIGatewayClient initializes and returns an API Gateway client
-func getAPIGatewayClient() *apigatewaymanagementapi.ApiGatewayManagementApi {
-	apiEndpoint := config.APIGatewayEndpoint
-	return apigatewaymanagementapi.New(session.Must(session.NewSession()), aws.NewConfig().WithEndpoint(apiEndpoint))
+// loadConfig loads configuration from environment variables
+func loadConfig() (Config, error) {
+	cfg := Config{
+		AnthropicURL:     os.Getenv("ANTHROPIC_URL"),
+		AnthropicKey:     os.Getenv("ANTHROPIC_KEY"),
+		AnthropicModel:   os.Getenv("ANTHROPIC_MODEL"),
+		AnthropicVersion: os.Getenv("ANTHROPIC_VERSION"),
+	}
+
+	if cfg.AnthropicKey == "" {
+		return cfg, fmt.Errorf("OpenAI API key not found in environment variable OPENAI_API_KEY")
+	}
+
+	if cfg.AnthropicModel == "" {
+		cfg.AnthropicModel = defaultAnthropicModel
+	}
+
+	if cfg.AnthropicVersion == "" {
+		cfg.AnthropicVersion = defaultAnthropicVersion
+	}
+
+	if cfg.AnthropicURL == "" {
+		return cfg, fmt.Errorf("API Gateway Endpoint not found in environment variable API_GW_ENDPOINT")
+	}
+
+	return cfg, nil
 }
 
 func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	switch event.RequestContext.RouteKey {
+	case "$connect":
+		return handleConnect(event)
+	case "$disconnect":
+		return handleDisconnect(event)
+	case "sendmessage":
+		return handleSendMessage(ctx, event)
+	default:
+		return createResponse(fmt.Sprintf("Unknown route key: %s", event.RequestContext.RouteKey), http.StatusBadRequest)
+	}
+}
+
+func handleConnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client connected: %s", event.RequestContext.ConnectionID)
+	return createResponse("Connected successfully", http.StatusOK)
+}
+
+func handleDisconnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("Client disconnected: %s", event.RequestContext.ConnectionID)
+	return createResponse("Disconnected successfully", http.StatusOK)
+}
+
+func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("event.Resource: %v\n", event.Resource)
 	fmt.Printf("event.Path: %v\n", event.Path)
 	fmt.Printf("event.HTTPMethod: %v\n", event.HTTPMethod)
@@ -69,44 +121,56 @@ func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyReq
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
-		return events.APIGatewayProxyResponse{StatusCode: http.StatusBadRequest}, err
+		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest)
 	}
 
 	// Create a channel to receive text blocks
 	textChan := make(chan string)
+	errorChan := make(chan error, 1)
 
-	// Start a goroutine to call Anthropic API and send text blocks to the channel
 	go func() {
 		defer close(textChan)
 		err := callAnthropicAPI(req, textChan)
 		if err != nil {
-			// In a real-world scenario, you'd want to handle this error more gracefully
-			fmt.Println("Error calling Anthropic API:", err)
+			errorChan <- err
 		}
+		close(errorChan)
 	}()
 
-	// Create a WebSocket client
-	wsClient, err := createWebSocketClient(ctx, event.RequestContext.ConnectionID, event.RequestContext.DomainName, event.RequestContext.Stage)
+	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
 	if err != nil {
-		return events.APIGatewayProxyResponse{StatusCode: 500}, err
+		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError)
 	}
 
-	// Stream text blocks to the WebSocket client
-	for text := range textChan {
-		err = sendWebSocketMessage(ctx, wsClient, text)
-		if err != nil {
-			return events.APIGatewayProxyResponse{StatusCode: 500}, err
+	for {
+		select {
+		case text, ok := <-textChan:
+			if !ok {
+				return createResponse("Message processing completed", http.StatusOK)
+			}
+			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
+			if err != nil {
+				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError)
+			}
+		case err := <-errorChan:
+			if err != nil {
+				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
+			}
 		}
 	}
-
-	return events.APIGatewayProxyResponse{StatusCode: 200}, nil
 }
 
 func callAnthropicAPI(req Request, textChan chan<- string) error {
+
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("error loading config: %s", err)
+	}
+
 	// Implement the logic to call Anthropic API and process the stream
-	// This is a placeholder implementation
-	anthropicURL := "https://api.anthropic.com/v1/messages"
-	anthropicAPIKey := "YOUR_ANTHROPIC_API_KEY"
+	anthropicURL := config.AnthropicURL
+	anthropicAPIKey := config.AnthropicKey
+	anthropicModel := config.AnthropicModel
 
 	// Marshal the messages
 	messagesJSON, err := json.Marshal(req.Messages)
@@ -115,7 +179,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	}
 
 	// Construct the request body
-	requestBody := fmt.Sprintf(`{"model": "claude-3-haiku-20240307", "max_tokens": 1024, "messages": %s}`, string(messagesJSON))
+	requestBody := fmt.Sprintf(`{"model": "%s", "max_tokens": 1024, "messages": %s}`, anthropicModel, string(messagesJSON))
 
 	httpReq, err := http.NewRequest("POST", anthropicURL, strings.NewReader(requestBody))
 	if err != nil {
@@ -169,20 +233,21 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 	return nil
 }
 
-func createWebSocketClient(ctx context.Context, connectionID, domainName, stage string) (*apigatewaymanagementapi.Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+func createWebSocketClient(ctx context.Context, domainName, stage string) (*apigatewaymanagementapi.Client, error) {
+	cfg, err := awsConfig.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load AWS config: %v", err)
 	}
 
 	client := apigatewaymanagementapi.NewFromConfig(cfg, func(o *apigatewaymanagementapi.Options) {
-		o.EndpointResolver = apigatewaymanagementapi.EndpointResolverFromURL(fmt.Sprintf("https://%s/%s", domainName, stage))
+		//		o.EndpointResolverV2 = apigatewaymanagementapi.EndpointResolverV2FromURL(fmt.Sprintf("https://%s/%s", domainName, stage))
+		o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s/%s", domainName, stage))
 	})
 
 	return client, nil
 }
 
-func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.Client, message string) error {
+func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string, message string) error {
 	_, err := client.PostToConnection(ctx, &apigatewaymanagementapi.PostToConnectionInput{
 		ConnectionId: aws.String(connectionID),
 		Data:         []byte(message),
