@@ -21,6 +21,11 @@ const (
 	defaultAnthropicVersion = "2023-06-01"
 	connectRouteKey         = "$connect"
 	disconnectRouteKey      = "$disconnect"
+	messageRouteKey         = "message"
+	envAnthropicURL         = "ANTHROPIC_URL"
+	envAnthropicKey         = "ANTHROPIC_KEY"
+	envAnthropicModel       = "ANTHROPIC_MODEL"
+	envAnthropicVersion     = "ANTHROPIC_VERSION"
 )
 
 type Message struct {
@@ -88,11 +93,11 @@ func loadConfig() (Config, error) {
 
 func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	switch event.RequestContext.RouteKey {
-	case "$connect":
+	case connectRouteKey:
 		return handleConnect(event)
-	case "$disconnect":
+	case disconnectRouteKey:
 		return handleDisconnect(event)
-	case "sendmessage":
+	case messageRouteKey:
 		return handleSendMessage(ctx, event)
 	default:
 		return createResponse(fmt.Sprintf("Unknown route key: %s", event.RequestContext.RouteKey), http.StatusBadRequest)
@@ -156,6 +161,8 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			if err != nil {
 				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
 			}
+		case <-ctx.Done():
+			return createResponse("Request timeout", http.StatusGatewayTimeout)
 		}
 	}
 }
