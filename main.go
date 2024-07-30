@@ -158,10 +158,11 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	// Create a channel to receive text blocks
 	textChan := make(chan string)
 	errorChan := make(chan error, 1)
+	doneChan := make(chan struct{})
 
 	go func() {
 		defer close(textChan)
-		err := callAnthropicAPI(req, textChan)
+		err := callAnthropicAPI(req, textChan, doneChan)
 		if err != nil {
 			errorChan <- err
 		}
@@ -190,6 +191,13 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 			if err != nil {
 				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError, nil)
 			}
+		case <-doneChan:
+			// Close the WebSocket connection
+			err = closeWebSocketConnection(ctx, wsClient, event.RequestContext.ConnectionID)
+			if err != nil {
+				return createResponse(fmt.Sprintf("Failed to close WebSocket connection: %v", err), http.StatusInternalServerError, nil)
+			}
+			return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 		case <-ctx.Done():
 			return createResponse("Request timeout", http.StatusGatewayTimeout, nil)
 		}
@@ -221,7 +229,7 @@ func ConvertToAnthropicRequest(req Request, model string, system string) *Anthro
 	return NewAnthropicRequest(model, system, messages)
 }
 
-func callAnthropicAPI(req Request, textChan chan<- string) error {
+func callAnthropicAPI(req Request, textChan chan<- string, doneChan chan<- struct{}) error {
 
 	config, err := loadConfig()
 	if err != nil {
@@ -301,6 +309,7 @@ func callAnthropicAPI(req Request, textChan chan<- string) error {
 				fmt.Println("Received message delta")
 			case "message_stop":
 				fmt.Println("Message stopped")
+				close(doneChan) // Signal completion
 				return nil
 			default:
 				fmt.Printf("Unhandled event type: %s", currentEvent)
@@ -328,6 +337,13 @@ func createWebSocketClient(ctx context.Context, domainName, stage string) (*apig
 	})
 
 	return client, nil
+}
+
+func closeWebSocketConnection(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string) error {
+	_, err := client.DeleteConnection(ctx, &apigatewaymanagementapi.DeleteConnectionInput{
+		ConnectionId: aws.String(connectionID),
+	})
+	return err
 }
 
 func sendWebSocketMessage(ctx context.Context, client *apigatewaymanagementapi.Client, connectionID string, message string) error {
