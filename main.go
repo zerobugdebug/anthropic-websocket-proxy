@@ -72,15 +72,22 @@ type Config struct {
 }
 
 // createResponse creates an API Gateway response with a specified message and status code
-func createResponse(message string, statusCode int) (events.APIGatewayProxyResponse, error) {
+func createResponse(message string, statusCode int, headers map[string]string) (events.APIGatewayProxyResponse, error) {
 	var retErr error
 	if statusCode != http.StatusOK {
 		retErr = fmt.Errorf(message, statusCode)
 	}
-	return events.APIGatewayProxyResponse{
+
+	response := events.APIGatewayProxyResponse{
 		Body:       message,
 		StatusCode: statusCode,
-	}, retErr
+	}
+
+	if len(headers) > 0 {
+		response.Headers = headers
+	}
+
+	return response, retErr
 }
 
 // loadConfig loads configuration from environment variables
@@ -124,12 +131,13 @@ func handleRequest(ctx context.Context, event events.APIGatewayWebsocketProxyReq
 
 func handleConnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client connected: %s", event.RequestContext.ConnectionID)
-	return createResponse("Connected successfully", http.StatusOK)
+	return createResponse("Connected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
+	//return createResponse("Connected successfully", http.StatusOK)
 }
 
 func handleDisconnect(event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
 	fmt.Printf("Client disconnected: %s", event.RequestContext.ConnectionID)
-	return createResponse("Disconnected successfully", http.StatusOK)
+	return createResponse("Disconnected successfully", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 }
 
 func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -144,7 +152,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 	var req Request
 	err := json.Unmarshal([]byte(event.Body), &req)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest)
+		return createResponse(fmt.Sprintf("Error parsing request JSON: %s", err), http.StatusBadRequest, nil)
 	}
 
 	// Create a channel to receive text blocks
@@ -162,7 +170,7 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 
 	wsClient, err := createWebSocketClient(ctx, event.RequestContext.DomainName, event.RequestContext.Stage)
 	if err != nil {
-		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError)
+		return createResponse(fmt.Sprintf("Failed to create WebSocket client: %v", err), http.StatusInternalServerError, nil)
 	}
 	fmt.Printf("wsClient: %v\n", wsClient)
 
@@ -171,19 +179,19 @@ func handleSendMessage(ctx context.Context, event events.APIGatewayWebsocketProx
 		case text, ok := <-textChan:
 			fmt.Printf("text: %v\n", text)
 			if !ok {
-				return createResponse("Message processing completed", http.StatusOK)
+				return createResponse("Message processing completed", http.StatusOK, map[string]string{"Sec-WebSocket-Protocol": event.Headers["Sec-WebSocket-Protocol"]})
 			}
 			err = sendWebSocketMessage(ctx, wsClient, event.RequestContext.ConnectionID, text)
 			if err != nil {
-				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Failed to send WebSocket message: %v", err), http.StatusInternalServerError, nil)
 			}
 		case err := <-errorChan:
 			fmt.Printf("err: %v\n", err)
 			if err != nil {
-				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError)
+				return createResponse(fmt.Sprintf("Error calling Anthropic API: %v", err), http.StatusInternalServerError, nil)
 			}
 		case <-ctx.Done():
-			return createResponse("Request timeout", http.StatusGatewayTimeout)
+			return createResponse("Request timeout", http.StatusGatewayTimeout, nil)
 		}
 	}
 }
